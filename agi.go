@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"regexp"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/pkg/errors"
 )
+
+var _Debugging bool = false
 
 // State describes the Asterisk channel state.  There are mapped
 // directly to the Asterisk enumerations.
@@ -58,11 +61,11 @@ type AGI struct {
 	// of the AGI session.
 	Variables map[string]string
 
-	r    io.Reader
-	eagi io.Reader
-	w    io.Writer
-
-	conn net.Conn
+	r     io.Reader
+	eagi  io.Reader
+	w     io.Writer
+	debug bool
+	conn  net.Conn
 
 	mu sync.Mutex
 }
@@ -110,6 +113,11 @@ const (
 // HandlerFunc is a function which accepts an AGI instance
 type HandlerFunc func(*AGI)
 
+// SetDebugging Set Debugging mode on/off
+func SetDebugging(enable bool) {
+	_Debugging = enable
+}
+
 // New creates an AGI session from the given reader and writer.
 func New(r io.Reader, w io.Writer) *AGI {
 	return NewWithEAGI(r, w, nil)
@@ -127,11 +135,29 @@ func NewWithEAGI(r io.Reader, w io.Writer, eagi io.Reader) *AGI {
 	}
 
 	s := bufio.NewScanner(a.r)
-	for s.Scan() {
-		terms := strings.Split(s.Text(), ":")
-		if len(terms) == 2 {
-			a.Variables[strings.TrimSpace(terms[0])] = strings.TrimSpace(terms[1])
+	if _Debugging {
+		log.Println("AGI: Start scanning")
+	}
+	for {
+		res := s.Scan()
+		if res {
+			if len(s.Bytes()) == 0 {
+				if _Debugging {
+					log.Println("AGI: Zero bytes input, exit scanning.")
+				}
+				break
+			}
+			terms := strings.SplitN(s.Text(), ":", 2)
+			if len(terms) == 2 {
+				a.Variables[strings.TrimSpace(terms[0])] = strings.TrimSpace(terms[1])
+			}
+			if _Debugging {
+				log.Println("AGI: Input Text - ", s.Text())
+			}
 		}
+	}
+	if _Debugging {
+		log.Println("AGI: End of scanning")
 	}
 	return &a
 }
@@ -170,7 +196,9 @@ func Listen(addr string, handler HandlerFunc) error {
 		if err != nil {
 			return errors.Wrap(err, "failed to accept TCP connection")
 		}
-
+		if _Debugging {
+			log.Println("AGI: Accepted new connection from ", conn.RemoteAddr())
+		}
 		go handler(NewConn(conn))
 	}
 }
@@ -196,8 +224,13 @@ func (a *AGI) Command(cmd ...string) (resp *Response) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	s := strings.Join(cmd, " ")
+	s = s + "\n"
+	if _Debugging {
+		log.Println("AGI: Command -> '" + s + "'")
+	}
 
-	_, err := a.w.Write([]byte(strings.Join(cmd, " ")))
+	_, err := a.w.Write([]byte(s))
 	if err != nil {
 		resp.Error = errors.Wrap(err, "failed to format command")
 		return
@@ -210,7 +243,9 @@ func (a *AGI) Command(cmd ...string) (resp *Response) {
 		return
 	}
 	raw := string(buf[:count])
-
+	if _Debugging {
+		log.Println("AGI: Response <- '" + raw + "'")
+	}
 	// Parse and store the result code
 	pieces := responseRegex.FindStringSubmatch(raw)
 	if pieces == nil {
